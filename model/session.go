@@ -1,5 +1,5 @@
 // Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// See LICENSE.txt for license information.
 
 package model
 
@@ -19,7 +19,10 @@ const (
 	SESSION_PROP_BROWSER              = "browser"
 	SESSION_PROP_TYPE                 = "type"
 	SESSION_PROP_USER_ACCESS_TOKEN_ID = "user_access_token_id"
+	SESSION_PROP_IS_BOT               = "is_bot"
+	SESSION_PROP_IS_BOT_VALUE         = "true"
 	SESSION_TYPE_USER_ACCESS_TOKEN    = "UserAccessToken"
+	SESSION_PROP_IS_GUEST             = "is_guest"
 	SESSION_ACTIVITY_TIMEOUT          = 1000 * 60 * 5 // 5 minutes
 	SESSION_USER_ACCESS_TOKEN_EXPIRY  = 100 * 365     // 100 years
 )
@@ -36,6 +39,13 @@ type Session struct {
 	IsOAuth        bool          `json:"is_oauth"`
 	Props          StringMap     `json:"props"`
 	TeamMembers    []*TeamMember `json:"team_members" db:"-"`
+	Local          bool          `json:"local" db:"-"`
+}
+
+// Returns true if the session is unrestricted, which should grant it
+// with all permissions. This is used for local mode sessions
+func (me *Session) IsUnrestricted() bool {
+	return me.Local
 }
 
 func (me *Session) DeepCopy() *Session {

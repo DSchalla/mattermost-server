@@ -1,5 +1,5 @@
-// Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
 
 package sqlstore
 
@@ -8,15 +8,15 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/store"
+	"github.com/mattermost/mattermost-server/v5/model"
+	"github.com/mattermost/mattermost-server/v5/store"
 )
 
 type SqlComplianceStore struct {
 	SqlStore
 }
 
-func NewSqlComplianceStore(sqlStore SqlStore) store.ComplianceStore {
+func newSqlComplianceStore(sqlStore SqlStore) store.ComplianceStore {
 	s := &SqlComplianceStore{sqlStore}
 
 	for _, db := range sqlStore.GetAllConns() {
@@ -33,7 +33,7 @@ func NewSqlComplianceStore(sqlStore SqlStore) store.ComplianceStore {
 	return s
 }
 
-func (s SqlComplianceStore) CreateIndexesIfNotExists() {
+func (s SqlComplianceStore) createIndexesIfNotExists() {
 }
 
 func (s SqlComplianceStore) Save(compliance *model.Compliance) (*model.Compliance, *model.AppError) {
@@ -48,12 +48,12 @@ func (s SqlComplianceStore) Save(compliance *model.Compliance) (*model.Complianc
 	return compliance, nil
 }
 
-func (us SqlComplianceStore) Update(compliance *model.Compliance) (*model.Compliance, *model.AppError) {
+func (s SqlComplianceStore) Update(compliance *model.Compliance) (*model.Compliance, *model.AppError) {
 	if err := compliance.IsValid(); err != nil {
 		return nil, err
 	}
 
-	if _, err := us.GetMaster().Update(compliance); err != nil {
+	if _, err := s.GetMaster().Update(compliance); err != nil {
 		return nil, model.NewAppError("SqlComplianceStore.Update", "store.sql_compliance.save.saving.app_error", nil, err.Error(), http.StatusInternalServerError)
 	}
 	return compliance, nil
@@ -69,13 +69,13 @@ func (s SqlComplianceStore) GetAll(offset, limit int) (model.Compliances, *model
 	return compliances, nil
 }
 
-func (us SqlComplianceStore) Get(id string) (*model.Compliance, *model.AppError) {
-	obj, err := us.GetReplica().Get(model.Compliance{}, id)
+func (s SqlComplianceStore) Get(id string) (*model.Compliance, *model.AppError) {
+	obj, err := s.GetReplica().Get(model.Compliance{}, id)
 	if err != nil {
 		return nil, model.NewAppError("SqlComplianceStore.Get", "store.sql_compliance.get.finding.app_error", nil, err.Error(), http.StatusInternalServerError)
 	}
 	if obj == nil {
-		return nil, model.NewAppError("SqlComplianceStore.Get", "store.sql_compliance.get.finding.app_error", nil, err.Error(), http.StatusNotFound)
+		return nil, model.NewAppError("SqlComplianceStore.Get", "store.sql_compliance.get.finding.app_error", nil, "", http.StatusNotFound)
 	}
 	return obj.(*model.Compliance), nil
 }
@@ -90,6 +90,7 @@ func (s SqlComplianceStore) ComplianceExport(job *model.Compliance) ([]*model.Co
 		keywordQuery = "AND ("
 
 		for index, keyword := range keywords {
+			keyword = sanitizeSearchTerm(keyword, "\\")
 			if index >= 1 {
 				keywordQuery += " OR LOWER(Posts.Message) LIKE :Keyword" + strconv.Itoa(index)
 			} else {
@@ -142,12 +143,14 @@ func (s SqlComplianceStore) ComplianceExport(job *model.Compliance) ([]*model.Co
 			Posts.Type AS PostType,
 			Posts.Props AS PostProps,
 			Posts.Hashtags AS PostHashtags,
-			Posts.FileIds AS PostFileIds
+			Posts.FileIds AS PostFileIds,
+			Bots.UserId IS NOT NULL AS IsBot
 		FROM
 			Teams,
 			Channels,
 			Users,
 			Posts
+        LEFT JOIN Bots ON Bots.UserId = Posts.UserId
 		WHERE
 			Teams.Id = Channels.TeamId
 				AND Posts.ChannelId = Channels.Id
@@ -177,11 +180,13 @@ func (s SqlComplianceStore) ComplianceExport(job *model.Compliance) ([]*model.Co
 			Posts.Type AS PostType,
 			Posts.Props AS PostProps,
 			Posts.Hashtags AS PostHashtags,
-			Posts.FileIds AS PostFileIds
+			Posts.FileIds AS PostFileIds,
+			Bots.UserId IS NOT NULL AS IsBot
 		FROM
 			Channels,
 			Users,
 			Posts
+		LEFT JOIN Bots ON Bots.UserId = Posts.UserId
 		WHERE
 			Channels.TeamId = ''
 				AND Posts.ChannelId = Channels.Id
@@ -207,10 +212,14 @@ func (s SqlComplianceStore) MessageExport(after int64, limit int) ([]*model.Mess
 		`SELECT
 			Posts.Id AS PostId,
 			Posts.CreateAt AS PostCreateAt,
+			Posts.UpdateAt AS PostUpdateAt,
+			Posts.DeleteAt AS PostDeleteAt,
 			Posts.Message AS PostMessage,
 			Posts.Type AS PostType,
+			Posts.Props AS PostProps,
 			Posts.OriginalId AS PostOriginalId,
 			Posts.RootId AS PostRootId,
+			Posts.Props AS PostProps,
 			Posts.FileIds AS PostFileIds,
 			Teams.Id AS TeamId,
 			Teams.Name AS TeamName,
@@ -225,16 +234,18 @@ func (s SqlComplianceStore) MessageExport(after int64, limit int) ([]*model.Mess
 			Channels.Type AS ChannelType,
 			Users.Id AS UserId,
 			Users.Email AS UserEmail,
-			Users.Username
+			Users.Username,
+			Bots.UserId IS NOT NULL AS IsBot
 		FROM
 			Posts
-			LEFT OUTER JOIN Channels ON Posts.ChannelId = Channels.Id
-			LEFT OUTER JOIN Teams ON Channels.TeamId = Teams.Id
-			LEFT OUTER JOIN Users ON Posts.UserId = Users.Id
+		LEFT OUTER JOIN Channels ON Posts.ChannelId = Channels.Id
+		LEFT OUTER JOIN Teams ON Channels.TeamId = Teams.Id
+		LEFT OUTER JOIN Users ON Posts.UserId = Users.Id
+		LEFT JOIN Bots ON Bots.UserId = Posts.UserId
 		WHERE
-			Posts.CreateAt > :StartTime AND
-			Posts.Type = ''
-		ORDER BY PostCreateAt
+			(Posts.CreateAt > :StartTime OR Posts.UpdateAt > :StartTime OR Posts.DeleteAt > :StartTime) AND
+			Posts.Type NOT LIKE 'system_%'
+		ORDER BY PostUpdateAt
 		LIMIT :Limit`
 
 	var cposts []*model.MessageExport

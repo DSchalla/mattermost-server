@@ -1,5 +1,5 @@
-// Copyright (c) 2017-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
 
 package app
 
@@ -12,24 +12,62 @@ import (
 	"image/color"
 	"image/png"
 	"io/ioutil"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path"
 	"path/filepath"
 	"strings"
 	"testing"
-	"text/template"
 	"time"
 
-	"github.com/mattermost/mattermost-server/utils/fileutils"
+	"github.com/mattermost/mattermost-server/v5/einterfaces/mocks"
+	"github.com/mattermost/mattermost-server/v5/model"
+	"github.com/mattermost/mattermost-server/v5/plugin"
+	"github.com/mattermost/mattermost-server/v5/utils"
+	"github.com/mattermost/mattermost-server/v5/utils/fileutils"
 
-	"github.com/mattermost/mattermost-server/model"
-	"github.com/mattermost/mattermost-server/plugin"
-	"github.com/mattermost/mattermost-server/utils"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-func setupPluginApiTest(t *testing.T, pluginCode string, pluginManifest string, pluginId string, app *App) string {
+func getDefaultPluginSettingsSchema() string {
+	ret, _ := json.Marshal(model.PluginSettingsSchema{
+		Settings: []*model.PluginSetting{
+			{Key: "BasicChannelName", Type: "text"},
+			{Key: "BasicChannelId", Type: "text"},
+			{Key: "BasicTeamDisplayName", Type: "text"},
+			{Key: "BasicTeamName", Type: "text"},
+			{Key: "BasicTeamId", Type: "text"},
+			{Key: "BasicUserEmail", Type: "text"},
+			{Key: "BasicUserId", Type: "text"},
+			{Key: "BasicUser2Email", Type: "text"},
+			{Key: "BasicUser2Id", Type: "text"},
+			{Key: "BasicPostMessage", Type: "text"},
+		},
+	})
+	return string(ret)
+}
+
+func setDefaultPluginConfig(th *TestHelper, pluginId string) {
+	th.App.UpdateConfig(func(cfg *model.Config) {
+		cfg.PluginSettings.Plugins[pluginId] = map[string]interface{}{
+			"BasicChannelName":     th.BasicChannel.Name,
+			"BasicChannelId":       th.BasicChannel.Id,
+			"BasicTeamName":        th.BasicTeam.Name,
+			"BasicTeamId":          th.BasicTeam.Id,
+			"BasicTeamDisplayName": th.BasicTeam.DisplayName,
+			"BasicUserEmail":       th.BasicUser.Email,
+			"BasicUserId":          th.BasicUser.Id,
+			"BasicUser2Email":      th.BasicUser2.Email,
+			"BasicUser2Id":         th.BasicUser2.Id,
+			"BasicPostMessage":     th.BasicPost.Message,
+		}
+	})
+}
+
+func setupMultiPluginApiTest(t *testing.T, pluginCodes []string, pluginManifests []string, pluginIds []string, app *App) string {
 	pluginDir, err := ioutil.TempDir("", "")
 	require.NoError(t, err)
 	webappPluginDir, err := ioutil.TempDir("", "")
@@ -37,25 +75,34 @@ func setupPluginApiTest(t *testing.T, pluginCode string, pluginManifest string, 
 	defer os.RemoveAll(pluginDir)
 	defer os.RemoveAll(webappPluginDir)
 
-	env, err := plugin.NewEnvironment(app.NewPluginAPI, pluginDir, webappPluginDir, app.Log)
+	env, err := plugin.NewEnvironment(app.NewPluginAPI, pluginDir, webappPluginDir, app.Log(), nil)
 	require.NoError(t, err)
 
-	backend := filepath.Join(pluginDir, pluginId, "backend.exe")
-	utils.CompileGo(t, pluginCode, backend)
+	require.Equal(t, len(pluginCodes), len(pluginIds))
+	require.Equal(t, len(pluginManifests), len(pluginIds))
 
-	ioutil.WriteFile(filepath.Join(pluginDir, pluginId, "plugin.json"), []byte(pluginManifest), 0600)
-	manifest, activated, reterr := env.Activate(pluginId)
-	require.Nil(t, reterr)
-	require.NotNil(t, manifest)
-	require.True(t, activated)
+	for i, pluginId := range pluginIds {
+		backend := filepath.Join(pluginDir, pluginId, "backend.exe")
+		utils.CompileGo(t, pluginCodes[i], backend)
+
+		ioutil.WriteFile(filepath.Join(pluginDir, pluginId, "plugin.json"), []byte(pluginManifests[i]), 0600)
+		manifest, activated, reterr := env.Activate(pluginId)
+		require.Nil(t, reterr)
+		require.NotNil(t, manifest)
+		require.True(t, activated)
+	}
 
 	app.SetPluginsEnvironment(env)
 
 	return pluginDir
 }
 
+func setupPluginApiTest(t *testing.T, pluginCode string, pluginManifest string, pluginId string, app *App) string {
+	return setupMultiPluginApiTest(t, []string{pluginCode}, []string{pluginManifest}, []string{pluginId}, app)
+}
+
 func TestPublicFilesPathConfiguration(t *testing.T) {
-	th := Setup(t).InitBasic()
+	th := Setup(t)
 	defer th.TearDown()
 
 	pluginID := "com.mattermost.sample"
@@ -65,7 +112,7 @@ func TestPublicFilesPathConfiguration(t *testing.T) {
 		package main
 
 		import (
-			"github.com/mattermost/mattermost-server/plugin"
+			"github.com/mattermost/mattermost-server/v5/plugin"
 		)
 
 		type MyPlugin struct {
@@ -83,6 +130,131 @@ func TestPublicFilesPathConfiguration(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, publicFilesPath, publicFilesFolderInTest)
 }
+
+func TestPluginAPIGetUserPreferences(t *testing.T) {
+	th := Setup(t)
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	user1, err := th.App.CreateUser(&model.User{
+		Email:    strings.ToLower(model.NewId()) + "success+test@example.com",
+		Password: "password",
+		Username: "user1" + model.NewId(),
+	})
+	require.Nil(t, err)
+	defer th.App.PermanentDeleteUser(user1)
+
+	preferences, err := api.GetPreferencesForUser(user1.Id)
+	require.Nil(t, err)
+	assert.Equal(t, 1, len(preferences))
+
+	assert.Equal(t, user1.Id, preferences[0].UserId)
+	assert.Equal(t, model.PREFERENCE_CATEGORY_TUTORIAL_STEPS, preferences[0].Category)
+	assert.Equal(t, user1.Id, preferences[0].Name)
+	assert.Equal(t, "0", preferences[0].Value)
+}
+
+func TestPluginAPIDeleteUserPreferences(t *testing.T) {
+	th := Setup(t)
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	user1, err := th.App.CreateUser(&model.User{
+		Email:    strings.ToLower(model.NewId()) + "success+test@example.com",
+		Password: "password",
+		Username: "user1" + model.NewId(),
+	})
+	require.Nil(t, err)
+	defer th.App.PermanentDeleteUser(user1)
+
+	preferences, err := api.GetPreferencesForUser(user1.Id)
+	require.Nil(t, err)
+	assert.Equal(t, 1, len(preferences))
+
+	err = api.DeletePreferencesForUser(user1.Id, preferences)
+	require.Nil(t, err)
+	preferences, err = api.GetPreferencesForUser(user1.Id)
+	require.Nil(t, err)
+	assert.Equal(t, 0, len(preferences))
+
+	user2, err := th.App.CreateUser(&model.User{
+		Email:    strings.ToLower(model.NewId()) + "success+test@example.com",
+		Password: "password",
+		Username: "user2" + model.NewId(),
+	})
+	require.Nil(t, err)
+	defer th.App.PermanentDeleteUser(user2)
+
+	preference := model.Preference{
+		Name:     user2.Id,
+		UserId:   user2.Id,
+		Category: model.PREFERENCE_CATEGORY_THEME,
+		Value:    `{"color": "#ff0000", "color2": "#faf"}`,
+	}
+	err = api.UpdatePreferencesForUser(user2.Id, []model.Preference{preference})
+	require.Nil(t, err)
+
+	preferences, err = api.GetPreferencesForUser(user2.Id)
+	require.Nil(t, err)
+	assert.Equal(t, 2, len(preferences))
+
+	err = api.DeletePreferencesForUser(user2.Id, []model.Preference{preference})
+	require.Nil(t, err)
+	preferences, err = api.GetPreferencesForUser(user2.Id)
+	require.Nil(t, err)
+	assert.Equal(t, 1, len(preferences))
+	assert.Equal(t, model.PREFERENCE_CATEGORY_TUTORIAL_STEPS, preferences[0].Category)
+}
+
+func TestPluginAPIUpdateUserPreferences(t *testing.T) {
+	th := Setup(t)
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	user1, err := th.App.CreateUser(&model.User{
+		Email:    strings.ToLower(model.NewId()) + "success+test@example.com",
+		Password: "password",
+		Username: "user1" + model.NewId(),
+	})
+	require.Nil(t, err)
+	defer th.App.PermanentDeleteUser(user1)
+
+	preferences, err := api.GetPreferencesForUser(user1.Id)
+	require.Nil(t, err)
+	assert.Equal(t, 1, len(preferences))
+	assert.Equal(t, user1.Id, preferences[0].UserId)
+	assert.Equal(t, model.PREFERENCE_CATEGORY_TUTORIAL_STEPS, preferences[0].Category)
+	assert.Equal(t, user1.Id, preferences[0].Name)
+	assert.Equal(t, "0", preferences[0].Value)
+
+	preference := model.Preference{
+		Name:     user1.Id,
+		UserId:   user1.Id,
+		Category: model.PREFERENCE_CATEGORY_THEME,
+		Value:    `{"color": "#ff0000", "color2": "#faf"}`,
+	}
+
+	err = api.UpdatePreferencesForUser(user1.Id, []model.Preference{preference})
+	require.Nil(t, err)
+
+	preferences, err = api.GetPreferencesForUser(user1.Id)
+	require.Nil(t, err)
+
+	assert.Equal(t, 2, len(preferences))
+	expectedCategories := []string{model.PREFERENCE_CATEGORY_TUTORIAL_STEPS, model.PREFERENCE_CATEGORY_THEME}
+	for _, pref := range preferences {
+		assert.Contains(t, expectedCategories, pref.Category)
+		assert.Equal(t, user1.Id, pref.UserId)
+		assert.Equal(t, user1.Id, pref.Name)
+		if pref.Category == model.PREFERENCE_CATEGORY_TUTORIAL_STEPS {
+			assert.Equal(t, "0", pref.Value)
+		} else {
+			newTheme, _ := json.Marshal(map[string]string{"color": "#ff0000", "color2": "#faf"})
+			assert.Equal(t, string(newTheme), preferences[0].Value)
+		}
+	}
+}
+
 func TestPluginAPIGetUsers(t *testing.T) {
 	th := Setup(t)
 	defer th.TearDown()
@@ -291,7 +463,7 @@ func TestPluginAPIGetFile(t *testing.T) {
 	info, err := th.App.DoUploadFile(uploadTime, th.BasicTeam.Id, th.BasicChannel.Id, th.BasicUser.Id, filename, fileData)
 	require.Nil(t, err)
 	defer func() {
-		th.App.Srv.Store.FileInfo().PermanentDelete(info.Id)
+		th.App.Srv().Store.FileInfo().PermanentDelete(info.Id)
 		th.App.RemoveFile(info.Path)
 	}()
 
@@ -304,8 +476,97 @@ func TestPluginAPIGetFile(t *testing.T) {
 	require.NotNil(t, err)
 	require.Nil(t, data)
 }
-func TestPluginAPISavePluginConfig(t *testing.T) {
+
+func TestPluginAPIGetFileInfos(t *testing.T) {
 	th := Setup(t).InitBasic()
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	fileInfo1, err := th.App.DoUploadFile(
+		time.Date(2020, 1, 1, 1, 1, 1, 1, time.UTC),
+		th.BasicTeam.Id,
+		th.BasicChannel.Id,
+		th.BasicUser.Id,
+		"testFile1",
+		[]byte("testfile1 Content"),
+	)
+	require.Nil(t, err)
+	defer func() {
+		th.App.Srv().Store.FileInfo().PermanentDelete(fileInfo1.Id)
+		th.App.RemoveFile(fileInfo1.Path)
+	}()
+
+	fileInfo2, err := th.App.DoUploadFile(
+		time.Date(2020, 1, 2, 1, 1, 1, 1, time.UTC),
+		th.BasicTeam.Id,
+		th.BasicChannel.Id,
+		th.BasicUser2.Id,
+		"testFile2",
+		[]byte("testfile2 Content"),
+	)
+	require.Nil(t, err)
+	defer func() {
+		th.App.Srv().Store.FileInfo().PermanentDelete(fileInfo2.Id)
+		th.App.RemoveFile(fileInfo2.Path)
+	}()
+
+	fileInfo3, err := th.App.DoUploadFile(
+		time.Date(2020, 1, 3, 1, 1, 1, 1, time.UTC),
+		th.BasicTeam.Id,
+		th.BasicChannel.Id,
+		th.BasicUser.Id,
+		"testFile3",
+		[]byte("testfile3 Content"),
+	)
+	require.Nil(t, err)
+	defer func() {
+		th.App.Srv().Store.FileInfo().PermanentDelete(fileInfo3.Id)
+		th.App.RemoveFile(fileInfo3.Path)
+	}()
+
+	_, err = api.CreatePost(&model.Post{
+		Message:   "testFile1",
+		UserId:    th.BasicUser.Id,
+		ChannelId: th.BasicChannel.Id,
+		FileIds:   model.StringArray{fileInfo1.Id},
+	})
+	require.Nil(t, err)
+
+	_, err = api.CreatePost(&model.Post{
+		Message:   "testFile2",
+		UserId:    th.BasicUser2.Id,
+		ChannelId: th.BasicChannel.Id,
+		FileIds:   model.StringArray{fileInfo2.Id},
+	})
+	require.Nil(t, err)
+
+	t.Run("get file infos with no options 2nd page of 1 per page", func(t *testing.T) {
+		fileInfos, err := api.GetFileInfos(1, 1, nil)
+		require.Nil(t, err)
+		require.Len(t, fileInfos, 1)
+	})
+	t.Run("get file infos filtered by user", func(t *testing.T) {
+		fileInfos, err := api.GetFileInfos(0, 5, &model.GetFileInfosOptions{
+			UserIds: []string{th.BasicUser.Id},
+		})
+		require.Nil(t, err)
+		require.Len(t, fileInfos, 2)
+	})
+	t.Run("get file infos filtered by channel ordered by created at descending", func(t *testing.T) {
+		fileInfos, err := api.GetFileInfos(0, 5, &model.GetFileInfosOptions{
+			ChannelIds:     []string{th.BasicChannel.Id},
+			SortBy:         model.FILEINFO_SORT_BY_CREATED,
+			SortDescending: true,
+		})
+		require.Nil(t, err)
+		require.Len(t, fileInfos, 2)
+		require.Equal(t, fileInfos[0].Id, fileInfo2.Id)
+		require.Equal(t, fileInfos[1].Id, fileInfo1.Id)
+	})
+}
+
+func TestPluginAPISavePluginConfig(t *testing.T) {
+	th := Setup(t)
 	defer th.TearDown()
 
 	manifest := &model.Manifest{
@@ -324,13 +585,11 @@ func TestPluginAPISavePluginConfig(t *testing.T) {
 	pluginConfigJsonString := `{"mystringsetting": "str", "MyIntSetting": 32, "myboolsetting": true}`
 
 	var pluginConfig map[string]interface{}
-	if err := json.Unmarshal([]byte(pluginConfigJsonString), &pluginConfig); err != nil {
-		t.Fatal(err)
-	}
+	err := json.Unmarshal([]byte(pluginConfigJsonString), &pluginConfig)
+	require.NoError(t, err)
 
-	if err := api.SavePluginConfig(pluginConfig); err != nil {
-		t.Fatal(err)
-	}
+	appErr := api.SavePluginConfig(pluginConfig)
+	require.Nil(t, appErr)
 
 	type Configuration struct {
 		MyStringSetting string
@@ -339,20 +598,18 @@ func TestPluginAPISavePluginConfig(t *testing.T) {
 	}
 
 	savedConfiguration := new(Configuration)
-	if err := api.LoadPluginConfiguration(savedConfiguration); err != nil {
-		t.Fatal(err)
-	}
+	err = api.LoadPluginConfiguration(savedConfiguration)
+	require.NoError(t, err)
 
 	expectedConfiguration := new(Configuration)
-	if err := json.Unmarshal([]byte(pluginConfigJsonString), &expectedConfiguration); err != nil {
-		t.Fatal(err)
-	}
+	err = json.Unmarshal([]byte(pluginConfigJsonString), &expectedConfiguration)
+	require.NoError(t, err)
 
 	assert.Equal(t, expectedConfiguration, savedConfiguration)
 }
 
 func TestPluginAPIGetPluginConfig(t *testing.T) {
-	th := Setup(t).InitBasic()
+	th := Setup(t)
 	defer th.TearDown()
 
 	manifest := &model.Manifest{
@@ -368,12 +625,12 @@ func TestPluginAPIGetPluginConfig(t *testing.T) {
 
 	api := NewPluginAPI(th.App, manifest)
 
-	pluginConfigJsonString := `{"mystringsetting": "str", "MyIntSetting": 32, "myboolsetting": true}`
+	pluginConfigJsonString := `{"mystringsetting": "str", "myintsetting": 32, "myboolsetting": true}`
 	var pluginConfig map[string]interface{}
 
-	if err := json.Unmarshal([]byte(pluginConfigJsonString), &pluginConfig); err != nil {
-		t.Fatal(err)
-	}
+	err := json.Unmarshal([]byte(pluginConfigJsonString), &pluginConfig)
+	require.NoError(t, err)
+
 	th.App.UpdateConfig(func(cfg *model.Config) {
 		cfg.PluginSettings.Plugins["pluginid"] = pluginConfig
 	})
@@ -383,22 +640,22 @@ func TestPluginAPIGetPluginConfig(t *testing.T) {
 }
 
 func TestPluginAPILoadPluginConfiguration(t *testing.T) {
-	th := Setup(t).InitBasic()
+	th := Setup(t)
 	defer th.TearDown()
 
 	var pluginJson map[string]interface{}
-	if err := json.Unmarshal([]byte(`{"mystringsetting": "str", "MyIntSetting": 32, "myboolsetting": true}`), &pluginJson); err != nil {
-		t.Fatal(err)
-	}
+	err := json.Unmarshal([]byte(`{"mystringsetting": "str", "MyIntSetting": 32, "myboolsetting": true}`), &pluginJson)
+	require.NoError(t, err)
+
 	th.App.UpdateConfig(func(cfg *model.Config) {
 		cfg.PluginSettings.Plugins["testloadpluginconfig"] = pluginJson
 	})
 
-	testFolder, found := fileutils.FindDir("tests")
+	testFolder, found := fileutils.FindDir("mattermost-server/app/plugin_api_tests")
 	require.True(t, found, "Cannot find tests folder")
-	fullPath := path.Join(testFolder, "plugin_tests", "manual.test_load_configuration_plugin", "main.go")
+	fullPath := path.Join(testFolder, "manual.test_load_configuration_plugin", "main.go")
 
-	err := pluginAPIHookTest(t, th, fullPath, "testloadpluginconfig", nil, `{"id": "testloadpluginconfig", "backend": {"executable": "backend.exe"}, "settings_schema": {
+	err = pluginAPIHookTest(t, th, fullPath, "testloadpluginconfig", `{"id": "testloadpluginconfig", "backend": {"executable": "backend.exe"}, "settings_schema": {
 		"settings": [
 			{
 				"key": "MyStringSetting",
@@ -414,27 +671,27 @@ func TestPluginAPILoadPluginConfiguration(t *testing.T) {
 			}
 		]
 	}}`)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 }
 
 func TestPluginAPILoadPluginConfigurationDefaults(t *testing.T) {
-	th := Setup(t).InitBasic()
+	th := Setup(t)
 	defer th.TearDown()
 
 	var pluginJson map[string]interface{}
-	if err := json.Unmarshal([]byte(`{"mystringsetting": "override"}`), &pluginJson); err != nil {
-		t.Fatal(err)
-	}
+	err := json.Unmarshal([]byte(`{"mystringsetting": "override"}`), &pluginJson)
+	require.NoError(t, err)
+
 	th.App.UpdateConfig(func(cfg *model.Config) {
 		cfg.PluginSettings.Plugins["testloadpluginconfig"] = pluginJson
 	})
 
-	testFolder, found := fileutils.FindDir("tests")
+	testFolder, found := fileutils.FindDir("mattermost-server/app/plugin_api_tests")
 	require.True(t, found, "Cannot find tests folder")
-	fullPath := path.Join(testFolder, "plugin_tests", "manual.test_load_configuration_defaults_plugin", "main.go")
+	fullPath := path.Join(testFolder, "manual.test_load_configuration_defaults_plugin", "main.go")
 
-	err := pluginAPIHookTest(t, th, fullPath, "testloadpluginconfig", nil, `{
+	err = pluginAPIHookTest(t, th, fullPath, "testloadpluginconfig", `{
 		"settings": [
 			{
 				"key": "MyStringSetting",
@@ -454,12 +711,12 @@ func TestPluginAPILoadPluginConfigurationDefaults(t *testing.T) {
 		]
 	}`)
 
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 }
 
 func TestPluginAPIGetPlugins(t *testing.T) {
-	th := Setup(t).InitBasic()
+	th := Setup(t)
 	defer th.TearDown()
 	api := th.SetupPluginAPI()
 
@@ -467,7 +724,7 @@ func TestPluginAPIGetPlugins(t *testing.T) {
     package main
 
     import (
-      "github.com/mattermost/mattermost-server/plugin"
+      "github.com/mattermost/mattermost-server/v5/plugin"
     )
 
     type MyPlugin struct {
@@ -486,7 +743,7 @@ func TestPluginAPIGetPlugins(t *testing.T) {
 	defer os.RemoveAll(pluginDir)
 	defer os.RemoveAll(webappPluginDir)
 
-	env, err := plugin.NewEnvironment(th.App.NewPluginAPI, pluginDir, webappPluginDir, th.App.Log)
+	env, err := plugin.NewEnvironment(th.App.NewPluginAPI, pluginDir, webappPluginDir, th.App.Log(), nil)
 	require.NoError(t, err)
 
 	pluginIDs := []string{"pluginid1", "pluginid2", "pluginid3"}
@@ -514,6 +771,165 @@ func TestPluginAPIGetPlugins(t *testing.T) {
 	assert.Nil(t, err)
 	assert.NotEmpty(t, plugins)
 	assert.Equal(t, pluginManifests, plugins)
+}
+
+func TestPluginAPIInstallPlugin(t *testing.T) {
+	th := Setup(t)
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	path, _ := fileutils.FindDir("tests")
+	tarData, err := ioutil.ReadFile(filepath.Join(path, "testplugin.tar.gz"))
+	require.NoError(t, err)
+
+	_, err = api.InstallPlugin(bytes.NewReader(tarData), true)
+	assert.NotNil(t, err, "should not allow upload if upload disabled")
+	assert.Equal(t, err.Error(), "installPlugin: Plugins and/or plugin uploads have been disabled., ")
+
+	th.App.UpdateConfig(func(cfg *model.Config) {
+		*cfg.PluginSettings.Enable = true
+		*cfg.PluginSettings.EnableUploads = true
+	})
+
+	manifest, err := api.InstallPlugin(bytes.NewReader(tarData), true)
+	defer os.RemoveAll("plugins/testplugin")
+	require.Nil(t, err)
+	assert.Equal(t, "testplugin", manifest.Id)
+
+	// Successfully installed
+	pluginsResp, err := api.GetPlugins()
+	require.Nil(t, err)
+
+	found := false
+	for _, m := range pluginsResp {
+		if m.Id == manifest.Id {
+			found = true
+		}
+	}
+
+	assert.True(t, found)
+}
+
+func TestInstallPlugin(t *testing.T) {
+	// TODO(ilgooz): remove this setup func to use existent setupPluginApiTest().
+	// following setupTest() func is a modified version of setupPluginApiTest().
+	// we need a modified version of setupPluginApiTest() because it wasn't possible to use it directly here
+	// since it removes plugin dirs right after it returns, does not update App configs with the plugin
+	// dirs and this behavior tends to break this test as a result.
+	setupTest := func(t *testing.T, pluginCode string, pluginManifest string, pluginID string, app *App) (func(), string) {
+		pluginDir, err := ioutil.TempDir("", "")
+		require.NoError(t, err)
+		webappPluginDir, err := ioutil.TempDir("", "")
+		require.NoError(t, err)
+
+		app.UpdateConfig(func(cfg *model.Config) {
+			*cfg.PluginSettings.Directory = pluginDir
+			*cfg.PluginSettings.ClientDirectory = webappPluginDir
+		})
+
+		env, err := plugin.NewEnvironment(app.NewPluginAPI, pluginDir, webappPluginDir, app.Log(), nil)
+		require.NoError(t, err)
+
+		app.SetPluginsEnvironment(env)
+
+		backend := filepath.Join(pluginDir, pluginID, "backend.exe")
+		utils.CompileGo(t, pluginCode, backend)
+
+		ioutil.WriteFile(filepath.Join(pluginDir, pluginID, "plugin.json"), []byte(pluginManifest), 0600)
+		manifest, activated, reterr := env.Activate(pluginID)
+		require.Nil(t, reterr)
+		require.NotNil(t, manifest)
+		require.True(t, activated)
+
+		return func() {
+			os.RemoveAll(pluginDir)
+			os.RemoveAll(webappPluginDir)
+		}, pluginDir
+	}
+
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+
+	// start an http server to serve plugin's tarball to the test.
+	path, _ := fileutils.FindDir("tests")
+	ts := httptest.NewServer(http.FileServer(http.Dir(path)))
+	defer ts.Close()
+
+	th.App.UpdateConfig(func(cfg *model.Config) {
+		*cfg.PluginSettings.Enable = true
+		*cfg.PluginSettings.EnableUploads = true
+		cfg.PluginSettings.Plugins["testinstallplugin"] = map[string]interface{}{
+			"DownloadURL": ts.URL + "/testplugin.tar.gz",
+		}
+	})
+
+	tearDown, _ := setupTest(t,
+		`
+		package main
+
+		import (
+			"net/http"
+
+			"github.com/pkg/errors"
+
+			"github.com/mattermost/mattermost-server/v5/plugin"
+		)
+
+		type configuration struct {
+			DownloadURL string
+		}
+
+		type Plugin struct {
+			plugin.MattermostPlugin
+
+			configuration configuration
+		}
+
+		func (p *Plugin) OnConfigurationChange() error {
+			if err := p.API.LoadPluginConfiguration(&p.configuration); err != nil {
+				return err
+			}
+			return nil
+		}
+
+		func (p *Plugin) OnActivate() error {
+			resp, err := http.Get(p.configuration.DownloadURL)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			_, aerr := p.API.InstallPlugin(resp.Body, true)
+			if aerr != nil {
+				return errors.Wrap(aerr, "cannot install plugin")
+			}
+			return nil
+		}
+
+		func main() {
+			plugin.ClientMain(&Plugin{})
+		}
+
+	`,
+		`{"id": "testinstallplugin", "backend": {"executable": "backend.exe"}, "settings_schema": {
+		"settings": [
+			{
+				"key": "DownloadURL",
+				"type": "text"
+			}
+		]
+	}}`, "testinstallplugin", th.App)
+	defer tearDown()
+
+	hooks, err := th.App.GetPluginsEnvironment().HooksForPlugin("testinstallplugin")
+	require.NoError(t, err)
+
+	err = hooks.OnActivate()
+	require.NoError(t, err)
+
+	plugins, aerr := th.App.GetPlugins()
+	require.Nil(t, aerr)
+	require.Len(t, plugins.Inactive, 1)
+	require.Equal(t, "testplugin", plugins.Inactive[0].Id)
 }
 
 func TestPluginAPIGetTeamIcon(t *testing.T) {
@@ -600,13 +1016,12 @@ func TestPluginAPIRemoveTeamIcon(t *testing.T) {
 	require.Nil(t, err)
 }
 
-func pluginAPIHookTest(t *testing.T, th *TestHelper, fileName string, id string, params map[string]interface{}, settingsSchema string) error {
-	tpl := template.Must(template.ParseFiles(fileName))
-	builder := &strings.Builder{}
-	if err := tpl.Execute(builder, params); err != nil {
-		panic(err)
+func pluginAPIHookTest(t *testing.T, th *TestHelper, fileName string, id string, settingsSchema string) error {
+	data, err := ioutil.ReadFile(fileName)
+	if err != nil {
+		return err
 	}
-	code := builder.String()
+	code := string(data)
 	schema := `{"settings": [ ]	}`
 	if settingsSchema != "" {
 		schema = settingsSchema
@@ -615,10 +1030,10 @@ func pluginAPIHookTest(t *testing.T, th *TestHelper, fileName string, id string,
 		fmt.Sprintf(`{"id": "%v", "backend": {"executable": "backend.exe"}, "settings_schema": %v}`, id, schema),
 		id, th.App)
 	hooks, err := th.App.GetPluginsEnvironment().HooksForPlugin(id)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	require.NotNil(t, hooks)
 	_, ret := hooks.MessageWillBePosted(nil, nil)
-	if ret != "" {
+	if ret != "OK" {
 		return errors.New(ret)
 	}
 	return nil
@@ -629,32 +1044,26 @@ func pluginAPIHookTest(t *testing.T, th *TestHelper, fileName string, id string,
 // 2. For each folder - compiles the main.go inside and executes it, validating it's result
 // 3. If folder starts with "manual." it is skipped ("manual." tests executed in other part of this file)
 // 4. Before compiling the main.go file is passed through templating and the following values are available in the template: BasicUser, BasicUser2, BasicChannel, BasicTeam, BasicPost
+// 5. Successfully running test should return nil, "OK". Any other returned string is considered and error
 
 func TestBasicAPIPlugins(t *testing.T) {
-	testFolder, found := fileutils.FindDir("tests")
-	require.True(t, found, "Cannot read find test folder")
-	fullPath := path.Join(testFolder, "plugin_tests")
-	dirs, err := ioutil.ReadDir(fullPath)
-	require.NoError(t, err, "Cannot read test folder %v", fullPath)
+	defaultSchema := getDefaultPluginSettingsSchema()
+	testFolder, found := fileutils.FindDir("mattermost-server/app/plugin_api_tests")
+	require.True(t, found, "Cannot read find app folder")
+	dirs, err := ioutil.ReadDir(testFolder)
+	require.NoError(t, err, "Cannot read test folder %v", testFolder)
 	for _, dir := range dirs {
 		d := dir.Name()
 		if dir.IsDir() && !strings.HasPrefix(d, "manual.") {
 			t.Run(d, func(t *testing.T) {
-				mainPath := path.Join(fullPath, d, "main.go")
+				mainPath := path.Join(testFolder, d, "main.go")
 				_, err := os.Stat(mainPath)
-				assert.NoError(t, err, "Cannot find plugin main file at %v", mainPath)
+				require.NoError(t, err, "Cannot find plugin main file at %v", mainPath)
 				th := Setup(t).InitBasic()
 				defer th.TearDown()
-				params := map[string]interface{}{
-					"BasicUser":    th.BasicUser,
-					"BasicUser2":   th.BasicUser2,
-					"BasicChannel": th.BasicChannel,
-					"BasicTeam":    th.BasicTeam,
-					"BasicPost":    th.BasicPost,
-				}
-
-				err = pluginAPIHookTest(t, th, mainPath, dir.Name(), params, "")
-				assert.NoError(t, err)
+				setDefaultPluginConfig(th, dir.Name())
+				err = pluginAPIHookTest(t, th, mainPath, dir.Name(), defaultSchema)
+				require.NoError(t, err)
 			})
 		}
 	}
@@ -756,6 +1165,58 @@ func TestPluginAPIKVCompareAndSet(t *testing.T) {
 	}
 }
 
+func TestPluginAPIKVCompareAndDelete(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	testCases := []struct {
+		Description   string
+		ExpectedValue []byte
+	}{
+		{
+			Description:   "Testing non-nil, non-empty value",
+			ExpectedValue: []byte("value1"),
+		},
+		{
+			Description:   "Testing empty value",
+			ExpectedValue: []byte(""),
+		},
+	}
+
+	for i, testCase := range testCases {
+		t.Run(testCase.Description, func(t *testing.T) {
+			expectedKey := fmt.Sprintf("Key%d", i)
+			expectedValue1 := testCase.ExpectedValue
+			expectedValue2 := []byte("value2")
+
+			// Set the value
+			err := api.KVSet(expectedKey, expectedValue1)
+			require.Nil(t, err)
+
+			// Attempt delete using an incorrect old value
+			deleted, err := api.KVCompareAndDelete(expectedKey, expectedValue2)
+			require.Nil(t, err)
+			require.False(t, deleted)
+
+			// Make sure the value is still there
+			value, err := api.KVGet(expectedKey)
+			require.Nil(t, err)
+			require.Equal(t, expectedValue1, value)
+
+			// Attempt delete using the proper value
+			deleted, err = api.KVCompareAndDelete(expectedKey, expectedValue1)
+			require.Nil(t, err)
+			require.True(t, deleted)
+
+			// Verify it's deleted
+			value, err = api.KVGet(expectedKey)
+			require.Nil(t, err)
+			require.Nil(t, value)
+		})
+	}
+}
+
 func TestPluginCreateBot(t *testing.T) {
 	th := Setup(t)
 	defer th.TearDown()
@@ -776,4 +1237,343 @@ func TestPluginCreateBot(t *testing.T) {
 	})
 	require.NotNil(t, err)
 
+}
+
+func TestPluginCreatePostWithUploadedFile(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	data := []byte("Hello World")
+	channelId := th.BasicChannel.Id
+	filename := "testGetFile"
+	fileInfo, err := api.UploadFile(data, channelId, filename)
+	require.Nil(t, err)
+	defer func() {
+		th.App.Srv().Store.FileInfo().PermanentDelete(fileInfo.Id)
+		th.App.RemoveFile(fileInfo.Path)
+	}()
+
+	actualData, err := api.GetFile(fileInfo.Id)
+	require.Nil(t, err)
+	assert.Equal(t, data, actualData)
+
+	userId := th.BasicUser.Id
+	post, err := api.CreatePost(&model.Post{
+		Message:   "test",
+		UserId:    userId,
+		ChannelId: channelId,
+		FileIds:   model.StringArray{fileInfo.Id},
+	})
+	require.Nil(t, err)
+	assert.Equal(t, model.StringArray{fileInfo.Id}, post.FileIds)
+
+	actualPost, err := api.GetPost(post.Id)
+	require.Nil(t, err)
+	assert.Equal(t, model.StringArray{fileInfo.Id}, actualPost.FileIds)
+}
+
+func TestPluginAPIGetConfig(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	config := api.GetConfig()
+	if config.LdapSettings.BindPassword != nil && len(*config.LdapSettings.BindPassword) > 0 {
+		assert.Equal(t, *config.LdapSettings.BindPassword, model.FAKE_SETTING)
+	}
+
+	assert.Equal(t, *config.FileSettings.PublicLinkSalt, model.FAKE_SETTING)
+
+	if len(*config.FileSettings.AmazonS3SecretAccessKey) > 0 {
+		assert.Equal(t, *config.FileSettings.AmazonS3SecretAccessKey, model.FAKE_SETTING)
+	}
+
+	if config.EmailSettings.SMTPPassword != nil && len(*config.EmailSettings.SMTPPassword) > 0 {
+		assert.Equal(t, *config.EmailSettings.SMTPPassword, model.FAKE_SETTING)
+	}
+
+	if len(*config.GitLabSettings.Secret) > 0 {
+		assert.Equal(t, *config.GitLabSettings.Secret, model.FAKE_SETTING)
+	}
+
+	assert.Equal(t, *config.SqlSettings.DataSource, model.FAKE_SETTING)
+	assert.Equal(t, *config.SqlSettings.AtRestEncryptKey, model.FAKE_SETTING)
+	assert.Equal(t, *config.ElasticsearchSettings.Password, model.FAKE_SETTING)
+
+	for i := range config.SqlSettings.DataSourceReplicas {
+		assert.Equal(t, config.SqlSettings.DataSourceReplicas[i], model.FAKE_SETTING)
+	}
+
+	for i := range config.SqlSettings.DataSourceSearchReplicas {
+		assert.Equal(t, config.SqlSettings.DataSourceSearchReplicas[i], model.FAKE_SETTING)
+	}
+}
+
+func TestPluginAPIGetUnsanitizedConfig(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	config := api.GetUnsanitizedConfig()
+	if config.LdapSettings.BindPassword != nil && len(*config.LdapSettings.BindPassword) > 0 {
+		assert.NotEqual(t, *config.LdapSettings.BindPassword, model.FAKE_SETTING)
+	}
+
+	assert.NotEqual(t, *config.FileSettings.PublicLinkSalt, model.FAKE_SETTING)
+
+	if len(*config.FileSettings.AmazonS3SecretAccessKey) > 0 {
+		assert.NotEqual(t, *config.FileSettings.AmazonS3SecretAccessKey, model.FAKE_SETTING)
+	}
+
+	if config.EmailSettings.SMTPPassword != nil && len(*config.EmailSettings.SMTPPassword) > 0 {
+		assert.NotEqual(t, *config.EmailSettings.SMTPPassword, model.FAKE_SETTING)
+	}
+
+	if len(*config.GitLabSettings.Secret) > 0 {
+		assert.NotEqual(t, *config.GitLabSettings.Secret, model.FAKE_SETTING)
+	}
+
+	assert.NotEqual(t, *config.SqlSettings.DataSource, model.FAKE_SETTING)
+	assert.NotEqual(t, *config.SqlSettings.AtRestEncryptKey, model.FAKE_SETTING)
+	assert.NotEqual(t, *config.ElasticsearchSettings.Password, model.FAKE_SETTING)
+
+	for i := range config.SqlSettings.DataSourceReplicas {
+		assert.NotEqual(t, config.SqlSettings.DataSourceReplicas[i], model.FAKE_SETTING)
+	}
+
+	for i := range config.SqlSettings.DataSourceSearchReplicas {
+		assert.NotEqual(t, config.SqlSettings.DataSourceSearchReplicas[i], model.FAKE_SETTING)
+	}
+}
+
+func TestPluginAddUserToChannel(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	member, err := api.AddUserToChannel(th.BasicChannel.Id, th.BasicUser.Id, th.BasicUser2.Id)
+	require.Nil(t, err)
+	require.NotNil(t, member)
+	require.Equal(t, th.BasicChannel.Id, member.ChannelId)
+	require.Equal(t, th.BasicUser.Id, member.UserId)
+}
+
+func TestInterpluginPluginHTTP(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+
+	setupMultiPluginApiTest(t,
+		[]string{`
+		package main
+
+		import (
+			"github.com/mattermost/mattermost-server/v5/plugin"
+			"bytes"
+			"net/http"
+		)
+
+		type MyPlugin struct {
+			plugin.MattermostPlugin
+		}
+
+		func (p *MyPlugin) ServeHTTP(c *plugin.Context, w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/api/v2/test" {
+				return
+			}
+			buf := bytes.Buffer{}
+			buf.ReadFrom(r.Body)
+			resp := "we got:" + buf.String()
+			w.WriteHeader(598)
+			w.Write([]byte(resp))
+		}
+
+		func main() {
+			plugin.ClientMain(&MyPlugin{})
+		}
+		`,
+			`
+		package main
+
+		import (
+			"github.com/mattermost/mattermost-server/v5/plugin"
+			"github.com/mattermost/mattermost-server/v5/model"
+			"bytes"
+			"net/http"
+			"io/ioutil"
+		)
+
+		type MyPlugin struct {
+			plugin.MattermostPlugin
+		}
+
+		func (p *MyPlugin) MessageWillBePosted(c *plugin.Context, post *model.Post) (*model.Post, string) {
+			buf := bytes.Buffer{}
+			buf.WriteString("This is the request")
+			req, err := http.NewRequest("GET", "/testplugininterserver/api/v2/test", &buf)
+			if err != nil {
+				return nil, err.Error()
+			}
+			req.Header.Add("Mattermost-User-Id", "userid")
+			resp := p.API.PluginHTTP(req)
+			if resp == nil {
+				return nil, "Nil resp"
+			}
+			if resp.Body == nil {
+				return nil, "Nil body"
+			}
+			respbody, err := ioutil.ReadAll(resp.Body)
+			if err != nil {
+				return nil, err.Error()
+			}
+			if resp.StatusCode != 598 {
+				return nil, "wrong status " + string(respbody)
+			}
+			return nil, string(respbody)
+		}
+
+		func main() {
+			plugin.ClientMain(&MyPlugin{})
+		}
+		`,
+		},
+		[]string{
+			`{"id": "testplugininterserver", "backend": {"executable": "backend.exe"}}`,
+			`{"id": "testplugininterclient", "backend": {"executable": "backend.exe"}}`,
+		},
+		[]string{
+			"testplugininterserver",
+			"testplugininterclient",
+		},
+		th.App,
+	)
+
+	hooks, err := th.App.GetPluginsEnvironment().HooksForPlugin("testplugininterclient")
+	require.NoError(t, err)
+	_, ret := hooks.MessageWillBePosted(nil, nil)
+	assert.Equal(t, "we got:This is the request", ret)
+}
+
+func TestApiMetrics(t *testing.T) {
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+
+	t.Run("", func(t *testing.T) {
+		metricsMock := &mocks.MetricsInterface{}
+
+		pluginDir, err := ioutil.TempDir("", "")
+		require.NoError(t, err)
+		webappPluginDir, err := ioutil.TempDir("", "")
+		require.NoError(t, err)
+		defer os.RemoveAll(pluginDir)
+		defer os.RemoveAll(webappPluginDir)
+
+		env, err := plugin.NewEnvironment(th.App.NewPluginAPI, pluginDir, webappPluginDir, th.App.Log(), metricsMock)
+		require.NoError(t, err)
+
+		th.App.SetPluginsEnvironment(env)
+
+		pluginId := model.NewId()
+		backend := filepath.Join(pluginDir, pluginId, "backend.exe")
+		code :=
+			`
+	package main
+
+	import (
+		"github.com/mattermost/mattermost-server/v5/model"
+		"github.com/mattermost/mattermost-server/v5/plugin"
+	)
+
+	type MyPlugin struct {
+		plugin.MattermostPlugin
+	}
+
+	func (p *MyPlugin) UserHasBeenCreated(c *plugin.Context, user *model.User) {
+		user.Nickname = "plugin-callback-success"
+		p.API.UpdateUser(user)
+	}
+
+	func main() {
+		plugin.ClientMain(&MyPlugin{})
+	}
+`
+		utils.CompileGo(t, code, backend)
+		ioutil.WriteFile(filepath.Join(pluginDir, pluginId, "plugin.json"), []byte(`{"id": "`+pluginId+`", "backend": {"executable": "backend.exe"}}`), 0600)
+
+		// Don't care about these mocks
+		metricsMock.On("ObservePluginHookDuration", mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return()
+		metricsMock.On("ObservePluginMultiHookIterationDuration", mock.Anything, mock.Anything, mock.Anything).Return()
+		metricsMock.On("ObservePluginMultiHookDuration", mock.Anything).Return()
+
+		// Setup mocks
+		metricsMock.On("ObservePluginApiDuration", pluginId, "UpdateUser", true, mock.Anything).Return()
+
+		_, _, activationErr := env.Activate(pluginId)
+		require.NoError(t, activationErr)
+
+		require.True(t, th.App.GetPluginsEnvironment().IsActive(pluginId))
+
+		user1 := &model.User{
+			Email:       model.NewId() + "success+test@example.com",
+			Nickname:    "Darth Vader1",
+			Username:    "vader" + model.NewId(),
+			Password:    "passwd1",
+			AuthService: "",
+		}
+		_, appErr := th.App.CreateUser(user1)
+		require.Nil(t, appErr)
+		time.Sleep(1 * time.Second)
+		user1, appErr = th.App.GetUser(user1.Id)
+		require.Nil(t, appErr)
+		require.Equal(t, "plugin-callback-success", user1.Nickname)
+
+		// Disable plugin
+		require.True(t, th.App.GetPluginsEnvironment().Deactivate(pluginId))
+		require.False(t, th.App.GetPluginsEnvironment().IsActive(pluginId))
+
+		metricsMock.AssertExpectations(t)
+	})
+}
+
+func TestPluginAPIGetPostsForChannel(t *testing.T) {
+	require := require.New(t)
+
+	th := Setup(t).InitBasic()
+	defer th.TearDown()
+	api := th.SetupPluginAPI()
+
+	numPosts := 10
+
+	// GetPostsForChannel returns posts ordered with the most recent first, so we
+	// need to invert the expected slice, the oldest post being BasicPost
+	expectedPosts := make([]*model.Post, numPosts)
+	expectedPosts[numPosts-1] = th.BasicPost
+	for i := numPosts - 2; i >= 0; i-- {
+		expectedPosts[i] = th.CreatePost(th.BasicChannel)
+	}
+	// CreatePost does not add Metadata, but initializes the structure. GetPostsForChannel
+	// returns nil for an empty Metadata, so we need to match that behaviour
+	for _, post := range expectedPosts {
+		post.Metadata = nil
+	}
+
+	postList, err := api.GetPostsForChannel(th.BasicChannel.Id, 0, 0)
+	require.Nil(err)
+	require.Nil(postList.ToSlice())
+
+	postList, err = api.GetPostsForChannel(th.BasicChannel.Id, 0, numPosts/2)
+	require.Nil(err)
+	require.Equal(expectedPosts[:numPosts/2], postList.ToSlice())
+
+	postList, err = api.GetPostsForChannel(th.BasicChannel.Id, 1, numPosts/2)
+	require.Nil(err)
+	require.Equal(expectedPosts[numPosts/2:], postList.ToSlice())
+
+	postList, err = api.GetPostsForChannel(th.BasicChannel.Id, 2, numPosts/2)
+	require.Nil(err)
+	require.Nil(postList.ToSlice())
+
+	postList, err = api.GetPostsForChannel(th.BasicChannel.Id, 0, numPosts+1)
+	require.Nil(err)
+	require.Equal(expectedPosts, postList.ToSlice())
 }

@@ -1,12 +1,13 @@
-// Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
 
 package commands
 
 import (
 	"fmt"
 
-	"github.com/mattermost/mattermost-server/model"
+	"github.com/mattermost/mattermost-server/v5/audit"
+	"github.com/mattermost/mattermost-server/v5/model"
 
 	"github.com/pkg/errors"
 	"github.com/spf13/cobra"
@@ -128,6 +129,10 @@ func channelGroupEnableCmdF(command *cobra.Command, args []string) error {
 		return errors.New("Unable to find channel '" + args[0] + "'")
 	}
 
+	if channel.Type != model.CHANNEL_PRIVATE {
+		return errors.New("Channel '" + args[0] + "' is not private. It cannot be group-constrained")
+	}
+
 	groups, _, appErr := a.GetGroupsByChannel(channel.Id, model.GroupSearchOpts{})
 	if appErr != nil {
 		return appErr
@@ -141,6 +146,10 @@ func channelGroupEnableCmdF(command *cobra.Command, args []string) error {
 	if _, appErr = a.UpdateChannel(channel); appErr != nil {
 		return appErr
 	}
+
+	auditRec := a.MakeAuditRecord("channelGroupEnable", audit.Success)
+	auditRec.AddMeta("channel", channel)
+	a.LogAuditRec(auditRec, nil)
 
 	return nil
 }
@@ -162,6 +171,10 @@ func channelGroupDisableCmdF(command *cobra.Command, args []string) error {
 		return appErr
 	}
 
+	auditRec := a.MakeAuditRecord("channelGroupDisable", audit.Success)
+	auditRec.AddMeta("channel", channel)
+	a.LogAuditRec(auditRec, nil)
+
 	return nil
 }
 
@@ -177,7 +190,7 @@ func channelGroupStatusCmdF(command *cobra.Command, args []string) error {
 		return errors.New("Unable to find channel '" + args[0] + "'")
 	}
 
-	if channel.GroupConstrained != nil && *channel.GroupConstrained {
+	if channel.IsGroupConstrained() {
 		fmt.Println("Enabled")
 	} else {
 		fmt.Println("Disabled")
@@ -236,6 +249,10 @@ func teamGroupEnableCmdF(command *cobra.Command, args []string) error {
 		return appErr
 	}
 
+	auditRec := a.MakeAuditRecord("teamGroupEnable", audit.Success)
+	auditRec.AddMeta("team", team)
+	a.LogAuditRec(auditRec, nil)
+
 	return nil
 }
 
@@ -256,6 +273,10 @@ func teamGroupDisableCmdF(command *cobra.Command, args []string) error {
 		return appErr
 	}
 
+	auditRec := a.MakeAuditRecord("teamGroupDisable", audit.Success)
+	auditRec.AddMeta("team", team)
+	a.LogAuditRec(auditRec, nil)
+
 	return nil
 }
 
@@ -271,7 +292,7 @@ func teamGroupStatusCmdF(command *cobra.Command, args []string) error {
 		return errors.New("Unable to find team '" + args[0] + "'")
 	}
 
-	if team.GroupConstrained != nil && *team.GroupConstrained {
+	if team.IsGroupConstrained() {
 		fmt.Println("Enabled")
 	} else {
 		fmt.Println("Disabled")

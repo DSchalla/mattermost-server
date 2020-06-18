@@ -1,12 +1,12 @@
-// Copyright (c) 2017-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
 
 package app
 
 import (
 	goi18n "github.com/mattermost/go-i18n/i18n"
 
-	"github.com/mattermost/mattermost-server/model"
+	"github.com/mattermost/mattermost-server/v5/model"
 )
 
 type RenameProvider struct {
@@ -25,12 +25,15 @@ func (me *RenameProvider) GetTrigger() string {
 }
 
 func (me *RenameProvider) GetCommand(a *App, T goi18n.TranslateFunc) *model.Command {
+	renameAutocompleteData := model.NewAutocompleteData(CMD_RENAME, T("api.command_channel_rename.hint"), T("api.command_channel_rename.desc"))
+	renameAutocompleteData.AddTextArgument(T("api.command_channel_rename.hint"), "[text]", "")
 	return &model.Command{
 		Trigger:          CMD_RENAME,
 		AutoComplete:     true,
 		AutoCompleteDesc: T("api.command_channel_rename.desc"),
 		AutoCompleteHint: T("api.command_channel_rename.hint"),
 		DisplayName:      T("api.command_channel_rename.name"),
+		AutocompleteData: renameAutocompleteData,
 	}
 }
 
@@ -67,10 +70,10 @@ func (me *RenameProvider) DoCommand(a *App, args *model.CommandArgs, message str
 			Text:         args.T("api.command_channel_rename.message.app_error"),
 			ResponseType: model.COMMAND_RESPONSE_TYPE_EPHEMERAL,
 		}
-	} else if len(message) > model.CHANNEL_NAME_UI_MAX_LENGTH {
+	} else if len(message) > model.CHANNEL_NAME_MAX_LENGTH {
 		return &model.CommandResponse{
 			Text: args.T("api.command_channel_rename.too_long.app_error", map[string]interface{}{
-				"Length": model.CHANNEL_NAME_UI_MAX_LENGTH,
+				"Length": model.CHANNEL_NAME_MAX_LENGTH,
 			}),
 			ResponseType: model.COMMAND_RESPONSE_TYPE_EPHEMERAL,
 		}

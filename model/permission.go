@@ -1,5 +1,5 @@
-// Copyright (c) 2016-present Mattermost, Inc. All Rights Reserved.
-// See License.txt for license information.
+// Copyright (c) 2015-present Mattermost, Inc. All Rights Reserved.
+// See LICENSE.txt for license information.
 
 package model
 
@@ -87,6 +87,11 @@ var PERMISSION_READ_OTHERS_BOTS *Permission
 var PERMISSION_MANAGE_BOTS *Permission
 var PERMISSION_MANAGE_OTHERS_BOTS *Permission
 var PERMISSION_VIEW_MEMBERS *Permission
+var PERMISSION_INVITE_GUEST *Permission
+var PERMISSION_PROMOTE_GUEST *Permission
+var PERMISSION_DEMOTE_TO_GUEST *Permission
+var PERMISSION_USE_CHANNEL_MENTIONS *Permission
+var PERMISSION_USE_GROUP_MENTIONS *Permission
 
 // General permission that encompasses all system admin functions
 // in the future this could be broken up to allow access to some
@@ -94,6 +99,9 @@ var PERMISSION_VIEW_MEMBERS *Permission
 var PERMISSION_MANAGE_SYSTEM *Permission
 
 var ALL_PERMISSIONS []*Permission
+
+var CHANNEL_MODERATED_PERMISSIONS []string
+var CHANNEL_MODERATED_PERMISSIONS_MAP map[string]string
 
 func initializePermissions() {
 	PERMISSION_INVITE_USER = &Permission{
@@ -533,6 +541,39 @@ func initializePermissions() {
 		"authentication.permisssions.view_members.description",
 		PERMISSION_SCOPE_TEAM,
 	}
+	PERMISSION_INVITE_GUEST = &Permission{
+		"invite_guest",
+		"authentication.permissions.invite_guest.name",
+		"authentication.permissions.invite_guest.description",
+		PERMISSION_SCOPE_TEAM,
+	}
+	PERMISSION_PROMOTE_GUEST = &Permission{
+		"promote_guest",
+		"authentication.permissions.promote_guest.name",
+		"authentication.permissions.promote_guest.description",
+		PERMISSION_SCOPE_SYSTEM,
+	}
+
+	PERMISSION_DEMOTE_TO_GUEST = &Permission{
+		"demote_to_guest",
+		"authentication.permissions.demote_to_guest.name",
+		"authentication.permissions.demote_to_guest.description",
+		PERMISSION_SCOPE_SYSTEM,
+	}
+
+	PERMISSION_USE_CHANNEL_MENTIONS = &Permission{
+		"use_channel_mentions",
+		"authentication.permissions.use_channel_mentions.name",
+		"authentication.permissions.use_channel_mentions.description",
+		PERMISSION_SCOPE_CHANNEL,
+	}
+
+	PERMISSION_USE_GROUP_MENTIONS = &Permission{
+		"use_group_mentions",
+		"authentication.permissions.use_group_mentions.name",
+		"authentication.permissions.use_group_mentions.description",
+		PERMISSION_SCOPE_CHANNEL,
+	}
 
 	ALL_PERMISSIONS = []*Permission{
 		PERMISSION_INVITE_USER,
@@ -606,6 +647,27 @@ func initializePermissions() {
 		PERMISSION_MANAGE_OTHERS_BOTS,
 		PERMISSION_MANAGE_SYSTEM,
 		PERMISSION_VIEW_MEMBERS,
+		PERMISSION_INVITE_GUEST,
+		PERMISSION_PROMOTE_GUEST,
+		PERMISSION_DEMOTE_TO_GUEST,
+		PERMISSION_USE_CHANNEL_MENTIONS,
+		PERMISSION_USE_GROUP_MENTIONS,
+	}
+
+	CHANNEL_MODERATED_PERMISSIONS = []string{
+		PERMISSION_CREATE_POST.Id,
+		"create_reactions",
+		"manage_members",
+		PERMISSION_USE_CHANNEL_MENTIONS.Id,
+	}
+
+	CHANNEL_MODERATED_PERMISSIONS_MAP = map[string]string{
+		PERMISSION_CREATE_POST.Id:                    CHANNEL_MODERATED_PERMISSIONS[0],
+		PERMISSION_ADD_REACTION.Id:                   CHANNEL_MODERATED_PERMISSIONS[1],
+		PERMISSION_REMOVE_REACTION.Id:                CHANNEL_MODERATED_PERMISSIONS[1],
+		PERMISSION_MANAGE_PUBLIC_CHANNEL_MEMBERS.Id:  CHANNEL_MODERATED_PERMISSIONS[2],
+		PERMISSION_MANAGE_PRIVATE_CHANNEL_MEMBERS.Id: CHANNEL_MODERATED_PERMISSIONS[2],
+		PERMISSION_USE_CHANNEL_MENTIONS.Id:           CHANNEL_MODERATED_PERMISSIONS[3],
 	}
 }
 
